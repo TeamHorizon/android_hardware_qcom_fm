@@ -80,6 +80,7 @@ public class FmSharedPreferences
    public static final int REGIONAL_BAND_UNITEDKINGDOM   = 34;
    public static final int REGIONAL_BAND_UNITED_STATES   = 35;
    public static final int REGIONAL_BAND_USER_DEFINED    = 36;
+   public static final int REGIONAL_BAND_INDONESIA       = 37;
 
    public static final int RECORD_DUR_INDEX_0_VAL        = 5;
    public static final int RECORD_DUR_INDEX_1_VAL       = 15;
@@ -167,6 +168,8 @@ public class FmSharedPreferences
    private static boolean mAFAutoSwitch = true;
    private static int mRecordDuration = 0;
    private static int mLastAudioMode = -1;
+
+   public static int mDefaultCountryIndex = REGIONAL_BAND_NORTH_AMERICA;
 
    FmSharedPreferences(Context context){
       mContext = context.getApplicationContext();
@@ -499,8 +502,8 @@ public class FmSharedPreferences
       if (Locale.getDefault().equals(Locale.CHINA)) {
           setCountry(sp.getInt(FMCONFIG_COUNTRY, REGIONAL_BAND_CHINA));
       } else {
-          int defaultIndex = mContext.getResources().getInteger(R.integer.default_country_index);
-          setCountry(sp.getInt(FMCONFIG_COUNTRY, defaultIndex));
+          mDefaultCountryIndex = mContext.getResources().getInteger(R.integer.default_country_index);
+          setCountry(sp.getInt(FMCONFIG_COUNTRY, mDefaultCountryIndex));
       }
       /* Last list the user was navigating */
       mListIndex = sp.getInt(LAST_LIST_INDEX, 0);
@@ -574,7 +577,7 @@ public class FmSharedPreferences
           setCountry(REGIONAL_BAND_CHINA);
           //Others set north America.
       } else {
-          setCountry(REGIONAL_BAND_NORTH_AMERICA);
+          setCountry(mDefaultCountryIndex);
       }
    }
 
@@ -1076,6 +1079,14 @@ public class FmSharedPreferences
           mFMConfiguration.setUpperLimit(107900);
           mFrequencyBand_Stepsize = 200;
           break;
+        }
+        case REGIONAL_BAND_INDONESIA:
+        {
+            /*INDONESIA : 87500 TO 108000 IN 100 KHZ STEPS*/
+            mFMConfiguration.setLowerLimit(87500);
+            mFMConfiguration.setUpperLimit(108000);
+            mFrequencyBand_Stepsize = 100;
+            break;
         }
         case REGIONAL_BAND_USER_DEFINED:
         {

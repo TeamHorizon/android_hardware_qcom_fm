@@ -200,7 +200,7 @@
     <item>Belgium</item>
     <item>Brazil</item>
     <item>China</item>
-    <item>Czech</item>
+    <item>Czech Republic</item>
     <item>Denmark</item>
     <item>Finland</item>
     <item>France</item>
@@ -225,9 +225,10 @@
     <item>Sweden</item>
     <item>Taiwan</item>
     <item>Turkey</item>
-    <item>United Kingdom </item>
+    <item>United Kingdom</item>
     <item>United States</item>
     <item>User defined band</item>
+    <item>Indonesia</item>
   </string-array>
 
   <string-array name="regional_band_values" translatable="false">
@@ -268,6 +269,7 @@
     <item>34</item>
     <item>35</item>
     <item>36</item>
+    <item>37</item>
   </string-array>
 
   <string-array name="regional_band_summary">
@@ -280,7 +282,7 @@
     <item>Belgium (87.5MHz to 108.0MHz in 100 KHz steps)</item>
     <item>Brazil (87.5MHz to 108.0MHz in 200 KHz steps)</item>
     <item>China (87.0MHz to 108.0MHz in 100 KHz steps)</item>
-    <item>Czech (87.5MHz to 108.0MHz in 100 KHz steps)</item>
+    <item>Czech Republic (87.5MHz to 108.0MHz in 100 KHz steps)</item>
     <item>Denmark (87.5MHz to 108.0MHz in 50 KHz steps)</item>
     <item>Finland (87.5MHz to 108.0MHz in 100 KHz steps)</item>
     <item>France (87.5MHz to 108.0MHz in 100 KHz steps)</item>
@@ -308,6 +310,7 @@
     <item>United Kingdom (87.5MHz to 108.0MHz in 100 KHz steps)</item>
     <item>United States (88.1MHz to 107.9MHz in 200 KHz steps)</item>
     <item>User defined band</item>
+    <item>Indonesia (87.5MHz to 108.0MHz in 100 KHz steps)</item>
   </string-array>
 
   <string-array name="channel_spacing_val" translatable="false">
