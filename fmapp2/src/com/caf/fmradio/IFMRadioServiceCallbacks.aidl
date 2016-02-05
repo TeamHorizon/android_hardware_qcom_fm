@@ -46,4 +46,6 @@ interface IFMRadioServiceCallbacks
   void onRecordingStopped();
   void onExtenRadioTextChanged();
   void onRecordingStarted();
+  void onSeekNextStation();
+  void onA2DPConnectionstateChanged(boolean state);
 }

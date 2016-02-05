@@ -18,7 +18,7 @@ interface IFMRadioService
     boolean routeAudio(int device);
     boolean unMute();
     boolean isMuted();
-    void startRecording();
+    boolean startRecording();
     void stopRecording();
     boolean tune(int frequency);
     boolean seek(boolean up);
@@ -73,5 +73,7 @@ interface IFMRadioService
     long getRecordingStartTime();
     boolean isSleepTimerActive();
     boolean isSSRInProgress();
+    boolean isRtPlusSupported();
+    boolean isA2DPConnected();
 }
 

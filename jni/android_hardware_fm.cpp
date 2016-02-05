@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2009-2015, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -38,7 +38,6 @@
 #include <cutils/properties.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
-#include <media/tavarua.h>
 #include <linux/videodev2.h>
 #include <math.h>
 
@@ -59,6 +58,16 @@
 #define WAIT_TIMEOUT 200000 /* 200*1000us */
 #define TX_RT_DELIMITER    0x0d
 #define PS_LEN    9
+#define V4L2_CID_PRIVATE_TAVARUA_STOP_RDS_TX_RT 0x08000017
+#define V4L2_CID_PRIVATE_TAVARUA_STOP_RDS_TX_PS_NAME 0x08000016
+#define V4L2_CID_PRIVATE_UPDATE_SPUR_TABLE 0x08000034
+#define V4L2_CID_PRIVATE_TAVARUA_TX_SETPSREPEATCOUNT 0x08000034
+#define MASK_PI                    (0x0000FFFF)
+#define MASK_PI_MSB                (0x0000FF00)
+#define MASK_PI_LSB                (0x000000FF)
+#define MASK_PTY                   (0x0000001F)
+#define MASK_TXREPCOUNT            (0x0000000F)
+
 enum search_dir_t {
     SEEK_UP,
     SEEK_DN,
@@ -99,7 +108,7 @@ static jint android_hardware_fmradio_FmReceiverJNI_acquireFdNative
     if( err >= 0 ) {
        ALOGD("Driver Version(Same as ChipId): %x \n",  cap.version );
        /*Conver the integer to string */
-       sprintf(versionStr, "%d", cap.version );
+       snprintf(versionStr, sizeof(versionStr), "%d", cap.version);
        property_set("hw.fm.version", versionStr);
     } else {
        return FM_JNI_FAILURE;
@@ -453,9 +462,10 @@ static jint android_hardware_fmradio_FmReceiverJNI_getBufferNative
 {
     int err;
     jboolean isCopy;
-    jbyte *byte_buffer;
+    jbyte *byte_buffer = NULL;
 
     if ((fd >= 0) && (index >= 0)) {
+        ALOGE("index: %d\n", index);
         byte_buffer = env->GetByteArrayElements(buff, &isCopy);
         err = FmIoctlsInterface :: get_buffer(fd,
                                                (char *)byte_buffer,
@@ -464,7 +474,11 @@ static jint android_hardware_fmradio_FmReceiverJNI_getBufferNative
         if (err < 0) {
             err = FM_JNI_FAILURE;
         }
-        env->ReleaseByteArrayElements(buff, byte_buffer, 0);
+        if (buff != NULL) {
+            ALOGE("Free the buffer\n");
+            env->ReleaseByteArrayElements(buff, byte_buffer, 0);
+            byte_buffer =  NULL;
+        }
     } else {
         err = FM_JNI_FAILURE;
     }

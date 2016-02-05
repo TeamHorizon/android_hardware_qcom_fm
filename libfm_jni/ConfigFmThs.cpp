@@ -1,36 +1,40 @@
 /*
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+Copyright (c) 2015, The Linux Foundation. All rights reserved.
 
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *        * Redistributions of source code must retain the above copyright
- *            notice, this list of conditions and the following disclaimer.
- *        * Redistributions in binary form must reproduce the above copyright
- *            notice, this list of conditions and the following disclaimer in the
- *            documentation and/or other materials provided with the distribution.
- *        * Neither the name of The Linux Foundation nor
- *            the names of its contributors may be used to endorse or promote
- *            products derived from this software without specific prior written
- *            permission.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+    * Neither the name of The Linux Foundation nor the names of its
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
 
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NON-INFRINGEMENT ARE DISCLAIMED.    IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
+THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT
+ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS
+BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#define LOG_TAG "android_hardware_fm"
 
 #include <cstdlib>
 #include <cstring>
+#include <utils/Log.h>
 #include "ConfigFmThs.h"
 #include "FmPerformanceParams.h"
-#include <utils/Log.h>
+#include "FmRadioController.h"
 
 static int compare_name
 (
@@ -55,6 +59,80 @@ ConfigFmThs :: ~ConfigFmThs
 )
 {
    free_key_file(keyfile);
+}
+
+void ConfigFmThs :: set_band_cfgs
+(
+   UINT fd
+)
+{
+    signed char ret = FM_SUCCESS;
+    char **keys;
+    char **keys_cpy;
+    char *key_value;
+    int value;
+    FmPerformanceParams perf_params;
+    struct NAME_MAP *found;
+
+    if(keyfile != NULL) {
+       keys_cpy = keys = get_keys(keyfile, GRPS_MAP[1].name);
+       if(keys != NULL) {
+          while(*keys != NULL) {
+              ALOGE("key found is: %s\n", *keys);
+              found = (NAME_MAP *)bsearch(*keys, BAND_CFG_MAP,
+                          MAX_BAND_PARAMS, sizeof(NAME_MAP), compare_name);
+              if(found != NULL) {
+                 key_value = get_value(keyfile,
+                                     GRPS_MAP[1].name, found->name);
+                 if((key_value != NULL) && strcmp(key_value, "")) {
+                    value = atoi(key_value);
+                    switch(found->num) {
+                    case RADIO_BAND:
+                         ALOGE("RADIO_BAND\n");
+                         if((value >= BAND_87500_108000)
+                             && (value <= BAND_76000_90000)) {
+                             ALOGE("%s:Set band as: %d\n",__func__, value);
+                             ret = perf_params.SetBand(fd, value);
+                             if(ret == FM_FAILURE)
+                                ALOGE("Error in setting band\n");
+                         }
+                         break;
+                    case EMPHASIS:
+                         ALOGE("EMPHASIS\n");
+                         if((value >= DE_EMP75)
+                             && (value <= DE_EMP50)) {
+                             ALOGE("%s:Set Emphasis as: %d\n",__func__, value);
+                             ret = perf_params.SetEmphsis(fd, value);
+                             if(ret == FM_FAILURE)
+                                ALOGE("Error in setting Emphasis\n");
+                         }
+                         break;
+                    case CHANNEL_SPACING:
+                         ALOGE("CHANNEL_SPACING\n");
+                         if((value >= CHAN_SPACE_200)
+                             && (value <= CHAN_SPACE_50)) {
+                             ALOGE("%s:Set CH space as: %d\n",__func__, value);
+                             ret = perf_params.SetChannelSpacing(fd, value);
+                             if(ret == FM_FAILURE)
+                                ALOGE("Error in setting channel spacing\n");
+                         }
+                         break;
+                   }
+                 }else {
+                   ALOGE("key_val for key: %s is empty\n",
+                             *keys);
+                 }
+                 free(key_value);
+              }
+              keys++;
+          }
+       }else {
+          ALOGE("No of keys found is zero\n");
+       }
+       free_strs(keys_cpy);
+    }else {
+       ALOGE("key file is null\n");
+    }
 }
 
 void ConfigFmThs :: set_af_ths
@@ -169,7 +247,7 @@ void ConfigFmThs :: set_srch_ths
     struct NAME_MAP *found = NULL;
 
     if(keyfile != NULL) {
-       keys_cpy = keys = get_keys(keyfile, GRPS_MAP[2].name);
+       keys_cpy = keys = get_keys(keyfile, GRPS_MAP[3].name);
        if(keys != NULL) {
           while(*keys != NULL) {
               found = (NAME_MAP *)bsearch(*keys, SEACH_PARAMS_MAP,
@@ -360,7 +438,7 @@ void ConfigFmThs :: set_hybrd_list
 
     ALOGE("Inside hybrid srch list\n");
     if(keyfile != NULL) {
-       keys_cpy = keys = get_keys(keyfile, GRPS_MAP[1].name);
+       keys_cpy = keys = get_keys(keyfile, GRPS_MAP[2].name);
        if(keys != NULL) {
           while(*keys != NULL) {
               found = (NAME_MAP *)bsearch(*keys, HYBRD_SRCH_MAP,
@@ -412,7 +490,7 @@ unsigned int ConfigFmThs :: extract_comma_sep_freqs
 )
 {
     char *next_freq;
-    char *saveptr = NULL;
+    char *saveptr;
     unsigned int freq;
     unsigned int *freqs_new_arr;
     unsigned int size = 0;
@@ -450,7 +528,7 @@ unsigned int ConfigFmThs :: extract_comma_sep_sinrs
 )
 {
     char *next_sinr;
-    char *saveptr = NULL;
+    char *saveptr;
     signed char *sinrs_new_arr;
     unsigned int size = 0;
     unsigned int len = 0;
@@ -475,7 +553,7 @@ unsigned int ConfigFmThs :: extract_comma_sep_sinrs
           }
           (*sinrs_arr)[len] = sinr;
           len++;
-          next_sinr = strtok_r(NULL, str, &saveptr);
+          next_sinr = strtok_r(NULL, str,&saveptr);
     }
     return len;
 }
@@ -492,7 +570,7 @@ void  ConfigFmThs :: SetRxSearchAfThs
 
     keyfile = get_key_file();
 
-    ALOGE("file name is: %s\n", file);
+    ALOGD("%s: file name is: %s\n", __func__, file);
     if(!parse_load_file(keyfile, file)) {
        ALOGE("Error in loading threshold file\n");
     }else {
@@ -513,6 +591,9 @@ void  ConfigFmThs :: SetRxSearchAfThs
                       break;
                  case HYBRD_SRCH_LIST:
                       set_hybrd_list(fd);
+                      break;
+                 case BAND_CFG:
+                      set_band_cfgs(fd);
                       break;
                  }
               }

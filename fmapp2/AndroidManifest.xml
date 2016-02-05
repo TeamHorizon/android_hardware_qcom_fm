@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
- * Copyright (c) 2009, 2012-2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2009, 2012-2013,2015, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -65,8 +65,6 @@
             android:screenOrientation="portrait"
             android:allowTaskReparenting="true"
             android:launchMode="singleTask"
-            android:configChanges="orientation|keyboardHidden|screenSize"
-            android:theme="@style/FMTheme"
             android:excludeFromRecents="false" >
 
             <intent-filter>
@@ -97,37 +95,6 @@
             </intent-filter>
 
         </activity>
-
-        <activity android:icon="@drawable/ic_launcher_fm_tx"
-            android:name=".FMTransmitterActivity"
-            android:label="@string/tx_app_name"
-            android:clearTaskOnLaunch="true"
-            android:taskAffinity=""
-            android:theme="@style/FMTheme"
-            android:excludeFromRecents="false">
-
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-
-            <intent-filter>
-                <action android:name="com.caf.fmradio.FMTRANSMITTER_ACTIVITY" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-
-        </activity>
-
-        <receiver android:name="FMTransmitterConfigReceiver">
-
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-            </intent-filter>
-
-        </receiver>
-
-        <service android:name=".FMTransmitterService"
-            android:exported="true" />
 
         <activity android:name=".FMStats"
             android:label="@string/test_menu">

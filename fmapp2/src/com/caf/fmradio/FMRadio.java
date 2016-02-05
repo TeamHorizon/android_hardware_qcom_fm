@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2009-2015, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -238,6 +238,7 @@ public class FMRadio extends Activity
 
    /* Current Status Indicators */
    private static boolean mRecording = false;
+   private static boolean mRtPlusSupported = false;
    private static boolean mIsScaning = false;
    private static boolean mIsSeeking = false;
    private static boolean mIsSearching = false;
@@ -460,9 +461,6 @@ public class FMRadio extends Activity
    @Override
    public void onStop() {
       Log.d(LOGTAG, "FMRadio: onStop");
-      if(isSleepTimerActive()) {
-         mSleepUpdateHandlerThread.interrupt();
-      }
       if(isRecording()) {
           try {
               if (null != mRecordUpdateHandlerThread) {
@@ -501,6 +499,10 @@ public class FMRadio extends Activity
    protected void onPause() {
       Log.d(LOGTAG, "FMRadio: onPause");
       super.onPause();
+      if (isSleepTimerActive()) {
+          Log.d(LOGTAG, "FMRadio: Sleep Timer active");
+          mSleepUpdateHandlerThread.interrupt();
+      }
       mRadioTextScroller.stopScroll();
       mERadioTextScroller.stopScroll();
       FmSharedPreferences.setTunedFrequency(mTunedStation.getFrequency());
@@ -671,6 +673,7 @@ public class FMRadio extends Activity
       MenuItem item;
       boolean radioOn = isFmOn();
       boolean recording = isRecording();
+      boolean RtPlusSupported = isRtPlusSupported();
       boolean mSpeakerPhoneOn = isSpeakerEnabled();
       boolean searchActive = isScanActive() || isSeekActive();
 
@@ -704,6 +707,9 @@ public class FMRadio extends Activity
       if (item != null) {
           item.setVisible(sleepActive && radioOn);
       }
+      item = menu.findItem(MENU_TAGS);
+      if (item != null)
+          item.setVisible(RtPlusSupported);
       return true;
    }
 
@@ -1707,7 +1713,7 @@ public class FMRadio extends Activity
 
             mDisableRadioHandler.removeCallbacks(mDisableRadioTask);
             mEnableRadioHandler.removeCallbacks(mEnableRadioTask);
-            mEnableRadioHandler.postDelayed(mEnableRadioTask, 0);
+            mEnableRadioHandler.postDelayed(mEnableRadioTask, 2000);
 
             cleanupTimeoutHandler();
             Log.e(LOGTAG, "Done with restart");
@@ -1774,9 +1780,17 @@ public class FMRadio extends Activity
    private void startRecording() {
       if(mService != null) {
          try {
-              mService.startRecording();
-         } catch (RemoteException e) {
-              e.printStackTrace();
+             mRecording = mService.startRecording();
+         }catch (RemoteException e) {
+             e.printStackTrace();
+         }
+         //Initiate record timer thread here
+         if(mRecording == true) {
+             mRecordingMsgTV.setCompoundDrawablesWithIntrinsicBounds
+                                   (R.drawable.recorder_stop, 0, 0, 0);
+             int durationInMins = FmSharedPreferences.getRecordDuration();
+             Log.e(LOGTAG, "Fected duration: " + durationInMins);
+             initiateRecordDurationTimer( durationInMins );
          }
       }
    }
@@ -1833,6 +1847,32 @@ public class FMRadio extends Activity
          }
       }
       return(mRecording);
+   }
+
+   private boolean isRtPlusSupported() {
+      mRtPlusSupported = false;
+      if (mService != null) {
+          try {
+             mRtPlusSupported = mService.isRtPlusSupported();
+          } catch (RemoteException e) {
+             e.printStackTrace();
+         }
+      }
+      Log.d(LOGTAG, "mRtPlusSupported: " + mRtPlusSupported);
+      return(mRtPlusSupported);
+   }
+
+   private boolean isA2DPConnected() {
+      boolean A2DPConnected = false;
+      if (mService != null) {
+          try {
+             A2DPConnected = mService.isA2DPConnected();
+          } catch (RemoteException e) {
+             e.printStackTrace();
+         }
+      }
+      Log.d(LOGTAG, "A2DPConnected: " + A2DPConnected);
+      return(A2DPConnected);
    }
 
    private boolean isSpeakerEnabled() {
@@ -2029,6 +2069,10 @@ public class FMRadio extends Activity
         }else{
             mSpeakerButton.setImageResource(R.drawable.btn_earphone);
         }
+        if (isA2DPConnected())
+            mSpeakerButton.setClickable(false);
+        else
+            mSpeakerButton.setClickable(true);
       }
    }
 
@@ -2225,6 +2269,16 @@ public class FMRadio extends Activity
       updateSearchProgress();
    }
 
+   private void A2DPConnectionState(boolean state) {
+      Log.d(LOGTAG, "A2DPConnectionState with:" +state);
+      if (state) {
+          Log.d(LOGTAG, "make speaker button disable");
+          mSpeakerButton.setClickable(false);
+      } else {
+          Log.d(LOGTAG, "make speaker button enable");
+          mSpeakerButton.setClickable(true);
+      }
+   }
    /** Scan related */
    private void initiateSearch(int pty) {
       synchronized (this) {
@@ -2975,12 +3029,21 @@ public class FMRadio extends Activity
 
    public  void unbindFromService(Context context) {
       ServiceBinder sb = (ServiceBinder) sConnectionMap.remove(context);
+      boolean isFmOn = isFmOn();
       Log.e(LOGTAG, "unbindFromService: Context");
       if (sb == null) {
          Log.e(LOGTAG, "Trying to unbind for unknown Context");
          return;
       }
       context.unbindService(sb);
+
+      if (isFmOn) {
+         Log.d(LOGTAG, "FM is still on");
+      } else {
+         Log.e(LOGTAG, "stop FM radio service");
+         context.stopService(new Intent(context, FMRadioService.class));
+      }
+
       if (sConnectionMap.isEmpty()) {
          // presumably there is nobody interested in the service at this point,
          // so don't hang on to the ServiceConnection
@@ -3158,6 +3221,14 @@ public class FMRadio extends Activity
       {
          Log.d(LOGTAG, "mServiceCallbacks.onRecordingStarted:");
          startRecordingTimer();
+      }
+      public void onSeekNextStation() {
+          Log.d(LOGTAG, "mServiceCallbacks.onSeekNextStation:");
+          SeekNextStation();
+      }
+      public void onA2DPConnectionstateChanged(boolean state){
+          Log.d(LOGTAG, "mServiceCallbacks.onA2DPConnectionstateChanged :");
+          A2DPConnectionState(state);
       }
    };
 

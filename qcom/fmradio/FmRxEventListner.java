@@ -132,6 +132,13 @@ class FmRxEventListner {
                                    case FmTransceiver.subSrchLevel_ScanInProg:
                                       Log.v(TAG, "Current state is " + state);
                                       FmReceiver.setSearchState(FmTransceiver.subSrchLevel_SrchComplete);
+                                      Log.v(TAG, "RxEvtList: CURRENT-STATE : Search ---> NEW-STATE :FMRxOn");
+                                      cb.FmRxEvSearchComplete(FmReceiverJNI.getFreqNative(fd));
+                                      break;
+                                   case FmTransceiver.subSrchLevel_SrchAbort:
+                                      Log.v(TAG, "Current state is SRCH_ABORTED");
+                                      Log.v(TAG, "Aborting on-going search command...");
+                                      FmReceiver.setSearchState(FmTransceiver.subSrchLevel_SrchComplete);
                                       Log.v(TAG, "RxEvtList: CURRENT-STATE : Search ---> NEW-STATE : FMRxOn");
                                       cb.FmRxEvSearchComplete(FmReceiverJNI.getFreqNative(fd));
                                       break;
@@ -206,15 +213,19 @@ class FmRxEventListner {
                             case 18:
                                 Log.d(TAG, "Got RADIO_DISABLED");
                                 if (FmTransceiver.getFMPowerState() == FmTransceiver.subPwrLevel_FMTurning_Off) {
+                                    FmTransceiver.release("/dev/radio0");
+                                    cb.FmRxEvDisableReceiver();
                                     /*Set the state as FMOff */
                                     FmTransceiver.setFMPowerState(FmTransceiver.FMState_Turned_Off);
                                     Log.v(TAG, "RxEvtList: CURRENT-STATE : FMTurningOff ---> NEW-STATE : FMOff");
-                                    FmTransceiver.release("/dev/radio0");
-                                    cb.FmRxEvDisableReceiver();
                                     Thread.currentThread().interrupt();
                                 } else {
                                     Log.d(TAG, "Unexpected RADIO_DISABLED recvd");
+                                    FmTransceiver.release("/dev/radio0");
                                     cb.FmRxEvRadioReset();
+                                    FmTransceiver.setFMPowerState(FmTransceiver.FMState_Turned_Off);
+                                    Log.v(TAG, "RxEvtList: CURRENT-STATE : FMRxOn ---> NEW-STATE : FMOff");
+                                    Thread.currentThread().interrupt();
                                 }
                                 break;
                             case 19:

@@ -2713,6 +2713,12 @@ public class FMStats extends Activity  {
              initiateRecordDurationTimer(durationInMins);
              invalidateOptionsMenu();
           }
+          public void onSeekNextStation() {
+             Log.d(LOGTAG, "mServiceCallbacks.onSeekNextStation:");
+          }
+          public void onA2DPConnectionstateChanged(boolean state){
+             Log.d(LOGTAG, "mServiceCallbacks.onA2DPConnectionstateChanged :");
+          }
       };
       /* Radio Vars */
      private Handler mHandler = new Handler();

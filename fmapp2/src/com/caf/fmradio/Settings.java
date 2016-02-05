@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2009-2014, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -158,22 +158,32 @@ public class Settings extends PreferenceActivity implements
            root.addPreference(mUserBandMinPref);
            root.addPreference(mUserBandMaxPref);
 
+           boolean audiomode = FmSharedPreferences.getAudioOutputMode();
            if (mRxMode) {
                // Audio Output (Stereo or Mono)
-               summaryAudioModeItems = getResources().getStringArray(
-                                        R.array.ster_mon_entries);
-               mAudioPreference = new ListPreference(this);
-               mAudioPreference.setEntries(R.array.ster_mon_entries);
-               mAudioPreference.setEntryValues(R.array.ster_mon_values);
-               mAudioPreference.setDialogTitle(R.string.aud_output_mode);
-               mAudioPreference.setKey(AUDIO_OUTPUT_KEY);
-               mAudioPreference.setTitle(R.string.aud_output_mode);
-               boolean audiomode = FmSharedPreferences.getAudioOutputMode();
-               if (audiomode) {
+               if (getResources().getBoolean(R.bool.def_only_stereo_enabled)) {
+                   summaryAudioModeItems = getResources()
+                           .getStringArray(R.array.ster_entries);
+                   mAudioPreference = new ListPreference(this);
+                   mAudioPreference.setEntries(R.array.ster_entries);
+                   mAudioPreference.setEntryValues(R.array.ster_values);
                    index = 0;
                } else {
-                   index = 1;
+                   summaryAudioModeItems = getResources()
+                           .getStringArray(R.array.ster_mon_entries);
+                   mAudioPreference = new ListPreference(this);
+                   mAudioPreference.setEntries(R.array.ster_mon_entries);
+                   mAudioPreference.setEntryValues(R.array.ster_mon_values);
+                   if (audiomode) {
+                      index = 0;
+                   } else {
+                      index = 1;
+                   }
                }
+               mAudioPreference.setDialogTitle(R.string.sel_audio_output);
+               mAudioPreference.setKey(AUDIO_OUTPUT_KEY);
+               mAudioPreference.setTitle(R.string.aud_output_mode);
+
                Log.d(LOGTAG, "createPreferenceHierarchy: audiomode: " + audiomode);
                mAudioPreference.setSummary(summaryAudioModeItems[index]);
                mAudioPreference.setValueIndex(index);
@@ -253,6 +263,7 @@ public class Settings extends PreferenceActivity implements
           int noOfChannels = 0;
           int channelSpacing = 0;
           int preIndex;
+          int band_width;
 
           if (key.equals(REGIONAL_BAND_KEY)) {
               int curListIndex = FmSharedPreferences.getCurrentListIndex();
@@ -327,8 +338,10 @@ public class Settings extends PreferenceActivity implements
                noOfChannels = 0;
                max_freq = FmSharedPreferences.getUpperLimit();
                min_freq = FmSharedPreferences.getLowerLimit();
-               noOfChannels =  (int) (max_freq - freq)/FmSharedPreferences.getFrequencyStepSize();
-               if((freq > 0) && (freq < max_freq) && (freq >= 76000) && (noOfChannels > 0)) {
+               band_width = (int) (max_freq - freq);
+               noOfChannels =  band_width/FmSharedPreferences.getFrequencyStepSize();
+               if((freq > 0) && (freq < max_freq) && (freq >= 76000)
+                  && (noOfChannels > 0) && (band_width >= 100)) {
                   FmSharedPreferences.setLowerLimit((int)freq);
                   sendSettingsChangedIntent(FM_BAND_CHANGED);
                   setBandSummary(summaryBandItems.length - 1);
@@ -353,8 +366,10 @@ public class Settings extends PreferenceActivity implements
                noOfChannels = 0;
                min_freq = FmSharedPreferences.getLowerLimit();
                max_freq = FmSharedPreferences.getUpperLimit();
-               noOfChannels = (int) (freq - min_freq)/FmSharedPreferences.getFrequencyStepSize();
-               if((freq > 0) && (freq > min_freq) && (freq <= 108000) && (noOfChannels > 0)) {
+               band_width = (int) (freq - min_freq);
+               noOfChannels = band_width/FmSharedPreferences.getFrequencyStepSize();
+               if((freq > 0) && (freq > min_freq) && (freq <= 108000)
+                  && (noOfChannels > 0) && (band_width >= 100)) {
                   FmSharedPreferences.setUpperLimit((int)freq);
                   sendSettingsChangedIntent(FM_BAND_CHANGED);
                   setBandSummary(summaryBandItems.length - 1);

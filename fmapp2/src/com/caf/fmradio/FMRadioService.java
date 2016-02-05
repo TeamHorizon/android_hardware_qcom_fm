@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2009-2015, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -49,6 +49,17 @@ import android.media.AudioManager;
 import android.media.AudioManager.OnAudioFocusChangeListener;
 import android.media.AudioSystem;
 import android.media.MediaRecorder;
+import android.media.AudioDevicePort;
+import android.media.AudioDevicePortConfig;
+import android.media.AudioFormat;
+import android.media.AudioManager.OnAudioPortUpdateListener;
+import android.media.AudioMixPort;
+import android.media.AudioPatch;
+import android.media.AudioPort;
+import android.media.AudioPortConfig;
+import android.media.AudioRecord;
+import android.media.AudioTrack;
+
 import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
@@ -77,7 +88,6 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.database.Cursor;
 import com.caf.utils.A2dpDeviceStatus;
-import android.media.AudioManager;
 import android.content.ComponentName;
 import android.os.StatFs;
 import android.os.SystemClock;
@@ -111,6 +121,7 @@ public class FMRadioService extends Service
    private BroadcastReceiver mAudioBecomeNoisyListener = null;
    private boolean mOverA2DP = false;
    private BroadcastReceiver mFmMediaButtonListener;
+   private BroadcastReceiver mAirplaneModeChanged;
    private IFMRadioServiceCallbacks mCallbacks;
    private static FmSharedPreferences mPrefs;
    private boolean mHeadsetPlugged = false;
@@ -126,6 +137,7 @@ public class FMRadioService extends Service
    MediaRecorder mA2dp = null;
    private boolean mFMOn = false;
    private boolean mFmRecordingOn = false;
+   private static boolean mRtPlusSupport = false;
    private boolean mSpeakerPhoneOn = false;
    private int mCallStatus = 0;
    private BroadcastReceiver mScreenOnOffReceiver = null;
@@ -133,6 +145,7 @@ public class FMRadioService extends Service
    private boolean misAnalogModeSupported = false;
    private boolean misAnalogPathEnabled = false;
    private boolean mA2dpDisconnected = false;
+   private boolean mA2dpConnected = false;
    //PhoneStateListener instances corresponding to each
 
    private FmRxRdsData mFMRxRDSData=null;
@@ -177,14 +190,25 @@ public class FMRadioService extends Service
    public static final String ACTION_FM_RECORDING_STATUS =
            "codeaurora.intent.action.FM.Recording.Status";
    private BroadcastReceiver mFmRecordingStatus  = null;
-   static final int RECORD_START = 1;
-   static final int RECORD_STOP = 0;
    private Thread mRecordServiceCheckThread = null;
-   private boolean mUnMuteOnFocusLoss = false;
-   private boolean mSpeakerOnFocusLoss = false;
    private MediaSession mSession;
    private boolean mIsSSRInProgress = false;
    private boolean mIsSSRInProgressFromActivity = false;
+   private int mKeyActionDownCount = 0;
+   private static final int AUDIO_SAMPLE_RATE = 44100;
+   private static final int AUDIO_CHANNEL_CONFIG =
+                                   AudioFormat.CHANNEL_CONFIGURATION_STEREO;
+   private static final int AUDIO_ENCODING_FORMAT =
+                                           AudioFormat.ENCODING_PCM_16BIT;
+   private static final int FM_RECORD_BUF_SIZE =
+                      AudioRecord.getMinBufferSize(AUDIO_SAMPLE_RATE,
+                                   AUDIO_CHANNEL_CONFIG, AUDIO_ENCODING_FORMAT);
+   private Thread mRecordSinkThread = null;
+   private AudioRecord mAudioRecord = null;
+   private AudioTrack mAudioTrack = null;
+   private boolean mIsRecordSink = false;
+   private static final int AUDIO_FRAMES_COUNT_TO_IGNORE = 3;
+   private Object mRecordSinkLock = new Object();
 
    private Notification.Builder mRadioNotification;
    private Notification mNotificationInstance;
@@ -213,7 +237,8 @@ public class FMRadioService extends Service
       registerSleepExpired();
       registerRecordTimeout();
       registerDelayedServiceStop();
-      registerFMRecordingStatus();
+      registerExternalStorageListener();
+      registerAirplaneModeStatusChanged();
       // registering media button receiver seperately as we need to set
       // different priority for receiving media events
       registerFmMediaButtonReceiver();
@@ -296,8 +321,17 @@ public class FMRadioService extends Service
           unregisterReceiver(mFmRecordingStatus);
           mFmRecordingStatus = null;
       }
+      if (mAirplaneModeChanged != null) {
+          unregisterReceiver(mAirplaneModeChanged);
+          mAirplaneModeChanged = null;
+      }
+      if( mSdcardUnmountReceiver != null ) {
+          unregisterReceiver(mSdcardUnmountReceiver);
+          mSdcardUnmountReceiver = null;
+      }
       /* Since the service is closing, disable the receiver */
-      fmOff();
+      if (isFmOn())
+          fmOff();
 
       TelephonyManager tmgr = (TelephonyManager) getSystemService(Context.TELEPHONY_SERVICE);
       tmgr.listen(mPhoneStateListener, 0);
@@ -309,49 +343,191 @@ public class FMRadioService extends Service
       super.onDestroy();
    }
 
-   public void registerFMRecordingStatus() {
-         if (mFmRecordingStatus == null) {
-             mFmRecordingStatus = new BroadcastReceiver() {
+   private synchronized void startAudioRecordSink() {
+        mAudioRecord = new AudioRecord(MediaRecorder.AudioSource.RADIO_TUNER,
+                                       AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_CONFIG,
+                                       AUDIO_ENCODING_FORMAT, FM_RECORD_BUF_SIZE);
+        mAudioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
+                                     AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_CONFIG,
+                                     AUDIO_ENCODING_FORMAT, FM_RECORD_BUF_SIZE,
+                                     AudioTrack.MODE_STREAM);
+   }
+
+   private synchronized void startRecordSink() {
+        Log.d(LOGTAG, "startRecordSink "
+                        + AudioSystem.getForceUse(AudioSystem.FOR_MEDIA));
+
+       if (mAudioRecord != null) {
+           mAudioRecord.stop();
+       }
+       if (mAudioTrack != null) {
+           mAudioTrack.stop();
+       }
+       startAudioRecordSink();
+       createRecordSinkThread();
+
+        mIsRecordSink = true;
+        synchronized (mRecordSinkLock) {
+            mRecordSinkLock.notify();
+        }
+   }
+
+   private synchronized void stopRecordSink() {
+        Log.d(LOGTAG, "stopRecordSink");
+        mRecordSinkLock = false;
+        synchronized (mRecordSinkLock) {
+            mRecordSinkLock.notify();
+        }
+    }
+
+    private synchronized void createRecordSinkThread() {
+        if (mRecordSinkThread == null) {
+            mRecordSinkThread = new RecordSinkThread();
+            mRecordSinkThread.start();
+        }
+    }
+
+    private synchronized void exitRecordSinkThread() {
+        stopRecordSink();
+        if (mRecordSinkThread != null) {
+            mRecordSinkThread.interrupt();
+        }
+        mRecordSinkThread = null;
+    }
+
+    private boolean isRecordSinking() {
+        return mIsRecordSink;
+    }
+
+    class RecordSinkThread extends Thread {
+        private int mCurrentFrame = 0;
+        private boolean isAudioFrameNeedIgnore() {
+            return mCurrentFrame < AUDIO_FRAMES_COUNT_TO_IGNORE;
+        }
+
+        @Override
+        public void run() {
+            try {
+                byte[] buffer = new byte[FM_RECORD_BUF_SIZE];
+                while (!Thread.interrupted()) {
+                    if (isRecordSinking()) {
+                        // Speaker mode or BT a2dp mode will come here and keep reading and writing.
+                        // If we want FM sound output from speaker or BT a2dp, we must record data
+                        // to AudioRecrd and write data to AudioTrack.
+                        if (mAudioRecord.getRecordingState() == AudioRecord.RECORDSTATE_STOPPED) {
+                            mAudioRecord.startRecording();
+                        }
+
+                        if (mAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_STOPPED) {
+                            mAudioTrack.play();
+                        }
+                        int size = mAudioRecord.read(buffer, 0, FM_RECORD_BUF_SIZE);
+                        // check whether need to ignore first 3 frames audio data from AudioRecord
+                        // to avoid pop noise.
+                        if (isAudioFrameNeedIgnore()) {
+                            mCurrentFrame += 1;
+                            continue ;
+                        }
+                        if (size <= 0) {
+                            Log.e(LOGTAG, "RecordSinkThread read data from AudioRecord "
+                                    + "error size: " + size);
+                            continue;
+                        }
+                        byte[] tmpBuf = new byte[size];
+                        System.arraycopy(buffer, 0, tmpBuf, 0, size);
+                        // Check again to avoid noises, because RecordSink may be changed
+                        // while AudioRecord is reading.
+                        if (isRecordSinking()) {
+                            mAudioTrack.write(tmpBuf, 0, tmpBuf.length);
+                        }
+                    } else {
+                        // Earphone mode will come here and wait.
+                        mCurrentFrame = 0;
+
+                        if (mAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                            mAudioTrack.stop();
+                        }
+
+                        if (mAudioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
+                            mAudioRecord.stop();
+                        }
+
+                        synchronized (mRecordSinkLock) {
+                            mRecordSinkLock.wait();
+                        }
+                    }
+                }
+            } catch (InterruptedException e) {
+                Log.d(LOGTAG, "RecordSinkThread.run, thread is interrupted, need exit thread");
+            } finally {
+                if (mAudioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
+                    mAudioRecord.stop();
+                }
+                if (mAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                    mAudioTrack.stop();
+                }
+            }
+        }
+    }
+
+    /**
+      * Registers an intent to listen for ACTION_MEDIA_UNMOUNTED notifications.
+      * The intent will call closeExternalStorageFiles() if the external media
+      * is going to be ejected, so applications can clean up.
+      */
+     public void registerExternalStorageListener() {
+         if (mSdcardUnmountReceiver == null) {
+             mSdcardUnmountReceiver = new BroadcastReceiver() {
                  @Override
                  public void onReceive(Context context, Intent intent) {
-                     Log.d(LOGTAG, "received intent " +intent);
                      String action = intent.getAction();
-                     if (action.equals(ACTION_FM_RECORDING_STATUS)) {
-                         Log.d(LOGTAG, "ACTION_FM_RECORDING_STATUS Intent received");
-                         int state = intent.getIntExtra("state", 0);
-                         if (state == RECORD_START) {
-                             Log.d(LOGTAG, "FM Recording started");
-                             mFmRecordingOn = true;
-                             mSampleStart = SystemClock.elapsedRealtime();
+                     if ((action.equals(Intent.ACTION_MEDIA_UNMOUNTED))
+                           || (action.equals(Intent.ACTION_MEDIA_EJECT))) {
+                         Log.d(LOGTAG, "ACTION_MEDIA_UNMOUNTED Intent received");
+                         if (mFmRecordingOn == true) {
                              try {
-                                  if ((mServiceInUse) && (mCallbacks != null) ) {
-                                      Log.d(LOGTAG, "start recording thread");
-                                      mCallbacks.onRecordingStarted();
-                                  }
-                                  startRecordServiceStatusCheck();
-                             } catch (RemoteException e) {
+                                  stopRecording();
+                             } catch (Exception e) {
                                   e.printStackTrace();
                              }
-                         } else if (state == RECORD_STOP) {
-                             Log.d(LOGTAG, "FM Recording stopped");
-                             mFmRecordingOn = false;
-                             try {
-                                  if ((mServiceInUse) && (mCallbacks != null) ) {
-                                     mCallbacks.onRecordingStopped();
-                                  }
-                             } catch (RemoteException e) {
-                                  e.printStackTrace();
-                             }
-                             mSampleStart = 0;
-                             stopRecordServiceStatusCheck();
-                        }
+                         }
                      }
                  }
              };
              IntentFilter iFilter = new IntentFilter();
-             iFilter.addAction(ACTION_FM_RECORDING_STATUS);
-             registerReceiver(mFmRecordingStatus , iFilter);
+             iFilter.addAction(Intent.ACTION_MEDIA_UNMOUNTED);
+             iFilter.addAction(Intent.ACTION_MEDIA_EJECT);
+             iFilter.addDataScheme("file");
+             registerReceiver(mSdcardUnmountReceiver, iFilter);
          }
+     }
+
+   public void registerAirplaneModeStatusChanged() {
+       if (mAirplaneModeChanged == null) {
+           mAirplaneModeChanged = new BroadcastReceiver() {
+               @Override
+               public void onReceive(Context context, Intent intent) {
+                   String action = intent.getAction();
+                   if (action.equals(Intent.ACTION_AIRPLANE_MODE_CHANGED)) {
+                       Log.d(LOGTAG, "ACTION_AIRPLANE_MODE_CHANGED received");
+                       boolean state = intent.getBooleanExtra("state", false);
+                       if (state == true) {
+                           fmOff();
+                           try {
+                               if ((mServiceInUse) && (mCallbacks != null) ) {
+                                   mCallbacks.onDisabled();
+                               }
+                           } catch (RemoteException e) {
+                               e.printStackTrace();
+                           }
+                       }
+                   }
+               }
+           };
+           IntentFilter iFilter = new IntentFilter();
+           iFilter.addAction(Intent.ACTION_AIRPLANE_MODE_CHANGED);
+           registerReceiver(mAirplaneModeChanged, iFilter);
+       }
    }
 
      /**
@@ -365,6 +541,7 @@ public class FMRadioService extends Service
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     String action = intent.getAction();
+                    Log.d(LOGTAG, "on receive HeadsetListener" +action);
                     if (action.equals(Intent.ACTION_HEADSET_PLUG)) {
                        Log.d(LOGTAG, "ACTION_HEADSET_PLUG Intent received");
                        // Listen for ACTION_HEADSET_PLUG broadcasts.
@@ -378,29 +555,27 @@ public class FMRadioService extends Service
                        // audio policy manager switch audio to speaker.
                        mHandler.removeCallbacks(mHeadsetPluginHandler);
                        mHandler.post(mHeadsetPluginHandler);
-                    } else if(mA2dpDeviceState.isA2dpStateChange(action) ) {
+                    } else if(mA2dpDeviceState.isA2dpStateChange(action) &&
+                             (mA2dpDeviceState.isConnected(intent) ||
+                              mA2dpDeviceState.isDisconnected(intent))) {
                         boolean  bA2dpConnected =
                         mA2dpDeviceState.isConnected(intent);
+                        Log.d(LOGTAG, "bA2dpConnected:" +bA2dpConnected);
+                        try {
+                             if ((mServiceInUse) && (mCallbacks != null))
+                                 mCallbacks.onA2DPConnectionstateChanged(bA2dpConnected);
+                        } catch (RemoteException e) {
+                             e.printStackTrace();
+                        }
                         if (!bA2dpConnected) {
                             Log.d(LOGTAG, "A2DP device is dis-connected!");
                             mA2dpDisconnected = true;
+                            mA2dpConnected = false;
                         } else {
                             Log.d(LOGTAG, "A2DP device is connected!");
                             mA2dpDisconnected = false;
+                            mA2dpConnected = true;
                         }
-                        if (isAnalogModeEnabled()) {
-                            Log.d(LOGTAG, "FM Audio Path is Analog Mode: FM Over BT not allowed");
-                            return ;
-                        }
-                       //when A2dp connected/disconnected
-                       // In above two cases we need to Stop and Start FM which
-                       // will take care of audio routing
-                       if( (isFmOn()) &&
-                           (false == mStoppedOnFocusLoss)) {
-                           Log.d(LOGTAG, "stopping and starting FM\n");
-                           stopFM();
-                           startFM();
-                       }
                     } else if (action.equals("HDMI_CONNECTED")) {
                         //FM should be off when HDMI is connected.
                         fmOff();
@@ -716,13 +891,6 @@ public class FMRadioService extends Service
       /* Application/UI is not attached, so go into lower power mode */
       unregisterCallbacks();
       setLowPowerMode(true);
-      if (isFmOn())
-      {
-         // something is currently playing, or will be playing once
-         // an in-progress call ends, so don't stop the service now.
-         return true;
-      }
-      stopSelf(mServiceStartId);
       return true;
    }
 
@@ -744,23 +912,6 @@ public class FMRadioService extends Service
       return myProcessName;
    }
 
-   private void sendRecordIntent(int action) {
-       Intent intent = new Intent(ACTION_FM_RECORDING);
-       intent.putExtra("state", action);
-       if(action == RECORD_START) {
-          int mRecordDuration = -1;
-          if(FmSharedPreferences.getRecordDuration() !=
-             FmSharedPreferences.RECORD_DUR_INDEX_3_VAL) {
-             mRecordDuration = (FmSharedPreferences.getRecordDuration() * 60 * 1000);
-          }
-          intent.putExtra("record_duration", mRecordDuration);
-          intent.putExtra("process_name", getProcessName());
-          intent.putExtra("process_id", Process.myPid());
-        }
-       Log.d(LOGTAG, "Sending Recording intent for = " +action);
-       getApplicationContext().sendBroadcast(intent);
-   }
-
    private void sendRecordServiceIntent(int action) {
        Intent intent = new Intent(ACTION_FM);
        intent.putExtra("state", action);
@@ -780,7 +931,7 @@ public class FMRadioService extends Service
            } catch (RemoteException e) {
                 e.printStackTrace();
            }
-       } else if( mServiceInUse ) {
+       } else if(isAntennaAvailable() && mServiceInUse ) {
            fmOn();
            try {
                 if (mCallbacks != null ) {
@@ -799,15 +950,30 @@ public class FMRadioService extends Service
             Log.d(LOGTAG, "SessionCallback.onMediaButton()...  event = " +event);
             int key_action = event.getAction();
             if ((event != null) && ((event.getKeyCode() == KeyEvent.KEYCODE_HEADSETHOOK)
-                                    || (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE))
-                                && (key_action == KeyEvent.ACTION_DOWN)) {
-                Log.d(LOGTAG, "SessionCallback: HEADSETHOOK/MEDIA_PLAY_PAUSE");
-                toggleFM();
+                                    || (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE))) {
+                if (key_action == KeyEvent.ACTION_DOWN) {
+                    mKeyActionDownCount++;
+                }
+                if ((mKeyActionDownCount == 1) && (key_action == KeyEvent.ACTION_UP)) {
+                    Log.d(LOGTAG, "SessionCallback: HEADSETHOOK/MEDIA_PLAY_PAUSE short press");
+                    mKeyActionDownCount = 0;
+                    toggleFM();
+                } else if ((mKeyActionDownCount == 2) && (key_action == KeyEvent.ACTION_DOWN)) {
+                    Log.d(LOGTAG, "SessionCallback: HEADSETHOOK/MEDIA_PLAY_PAUSE long press");
+                    if (isFmOn() && getResources()
+                            .getBoolean(R.bool.def_headset_next_enabled)) {
+                        try {
+                            mCallbacks.onSeekNextStation();
+                        }catch (RemoteException e) {
+                        }
+                    }
+                    mKeyActionDownCount = 0;
+                }
                 return true;
-            } else if((event != null) && (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PAUSE)
+            } else if((event != null) && (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY)
                        && (key_action == KeyEvent.ACTION_DOWN)) {
-                Log.d(LOGTAG, "SessionCallback: MEDIA_PAUSE");
-                if (mServiceInUse ) {
+                Log.d(LOGTAG, "SessionCallback: MEDIA_PLAY");
+                if (isAntennaAvailable() && mServiceInUse) {
                     fmOn();
                     try {
                         if (mCallbacks != null ) {
@@ -818,9 +984,10 @@ public class FMRadioService extends Service
                     }
                     return true;
                 }
-            } else if ((event != null) && (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY)
-                       && (key_action == KeyEvent.ACTION_DOWN)) {
-                Log.d(LOGTAG, "SessionCallback: MEDIA_PLAY");
+            } else if ((event != null) && ((event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PAUSE) ||
+                                           (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_STOP))
+                                       && (key_action == KeyEvent.ACTION_DOWN)) {
+                Log.d(LOGTAG, "SessionCallback: MEDIA_PAUSE");
                 if (isFmOn()){
                     //FM should be off when Headset hook pressed.
                     fmOff();
@@ -876,13 +1043,7 @@ public class FMRadioService extends Service
        mAudioManager.registerMediaButtonEventReceiver(fmRadio);
        mStoppedOnFocusLoss = false;
 
-       if (!isSpeakerEnabled() && !mA2dpDeviceSupportInHal &&  (true == mA2dpDeviceState.isDeviceAvailable()) &&
-           !isAnalogModeEnabled()
-            && (true == startA2dpPlayback())) {
-            mOverA2DP=true;
-            Log.d(LOGTAG, "Audio source set it as A2DP");
-            AudioSystem.setForceUse(AudioSystem.FOR_MEDIA, AudioSystem.FORCE_BT_A2DP);
-       } else {
+       if (!mA2dpDeviceState.isDeviceAvailable()) {
            Log.d(LOGTAG, "FMRadio: Requesting to start FM");
            //reason for resending the Speaker option is we are sending
            //ACTION_FM=1 to AudioManager, the previous state of Speaker we set
@@ -895,40 +1056,20 @@ public class FMRadioService extends Service
                Log.d(LOGTAG, "Audio source set it as headset");
                AudioSystem.setForceUse(AudioSystem.FOR_MEDIA, AudioSystem.FORCE_NONE);
            }
-           AudioSystem.setDeviceConnectionState(AudioSystem.DEVICE_OUT_FM,
-                               AudioSystem.DEVICE_STATE_AVAILABLE, "");
-
        }
-       sendRecordServiceIntent(RECORD_START);
+       startRecordSink();
        mPlaybackInProgress = true;
-       mUnMuteOnFocusLoss = false;
-       mSpeakerOnFocusLoss = false;
    }
 
    private void stopFM(){
        Log.d(LOGTAG, "In stopFM");
-       if (mOverA2DP==true){
-           mOverA2DP=false;
-           stopA2dpPlayback();
-       }else{
-           Log.d(LOGTAG, "FMRadio: Requesting to stop FM");
-           AudioSystem.setDeviceConnectionState(AudioSystem.DEVICE_OUT_FM,
-                                     AudioSystem.DEVICE_STATE_UNAVAILABLE, "");
-       }
+       stopRecordSink();
+       exitRecordSinkThread();
        mPlaybackInProgress = false;
    }
 
    private void resetFM(){
        Log.d(LOGTAG, "resetFM");
-       if (mOverA2DP==true){
-           mOverA2DP=false;
-           resetA2dpPlayback();
-       }else{
-           Log.d(LOGTAG, "FMRadio: Requesting to stop FM");
-           AudioSystem.setDeviceConnectionState(AudioSystem.DEVICE_OUT_FM,
-                                     AudioSystem.DEVICE_STATE_UNAVAILABLE, "");
-           sendRecordServiceIntent(RECORD_STOP);
-       }
        mPlaybackInProgress = false;
    }
 
@@ -948,176 +1089,272 @@ public class FMRadioService extends Service
        return status;
    }
 
-   private Runnable recordStatusCheckThread = new Runnable() {
-       @Override
-       public void run() {
-          while(!Thread.currentThread().isInterrupted()) {
-               try {
-                     if(!getRecordServiceStatus()) {
-                        Log.d(LOGTAG, "FM Recording Service stopped");
-                        mFmRecordingOn = false;
-                        try {
-                            if ((mServiceInUse) && (mCallbacks != null) ) {
-                                Log.d(LOGTAG, "Callback for stop recording");
-                                mCallbacks.onRecordingStopped();
-                            }
-                        } catch (RemoteException e) {
-                            e.printStackTrace();
-                        }
-                        mSampleStart = 0;
-                        break;
-                     };
-                     Thread.sleep(500);
-                }catch(Exception e) {
-                     Log.d(LOGTAG, "RecordService status check thread interrupted");
-                     break;
-                }
-          }
-       }
-   };
+   public boolean startRecording() {
+      int mRecordDuration = -1;
 
-   private void startRecordServiceStatusCheck() {
-       if((mRecordServiceCheckThread == null) ||
-          (mRecordServiceCheckThread.getState() == Thread.State.TERMINATED)) {
-           mRecordServiceCheckThread = new Thread(null,
-                                           recordStatusCheckThread,
-                                           "getRecordServiceStatus");
-       }
-       if((mRecordServiceCheckThread != null) &&
-          (mRecordServiceCheckThread.getState() == Thread.State.NEW)) {
-           mRecordServiceCheckThread.start();
-       }
-   }
-
-   private void stopRecordServiceStatusCheck() {
-       if(mRecordServiceCheckThread != null) {
-          mRecordServiceCheckThread.interrupt();
-       }
-   }
-
-   public void startRecording() {
-       Log.d(LOGTAG, "In startRecording of Recorder");
-       if (!getRecordServiceStatus()) {
-           Log.d(LOGTAG, "Recording Service is not in running state");
-           sendRecordServiceIntent(RECORD_START);
-           try {
-               Thread.sleep(200);
-           } catch (Exception ex) {
-               Log.d( LOGTAG, "RunningThread InterruptedException");
-               return;
-           }
-       }
-       if ((true == mSingleRecordingInstanceSupported) &&
-                               (true == mOverA2DP )) {
-            Toast.makeText( this,
-                      "playback on BT in progress,can't record now",
-                       Toast.LENGTH_SHORT).show();
-            return;
-       }
-       sendRecordIntent(RECORD_START);
-   }
-
-   public boolean startA2dpPlayback() {
-        Log.d(LOGTAG, "In startA2dpPlayback");
-    if( (true == mSingleRecordingInstanceSupported) &&
-        (true == mFmRecordingOn )) {
-                Toast.makeText(this,
-                               "Recording already in progress,can't play on BT",
-                               Toast.LENGTH_SHORT).show();
-                return false;
-       }
-        if(mOverA2DP)
-           stopA2dpPlayback();
-        mA2dp = new MediaRecorder();
-        if (mA2dp == null) {
-           Toast.makeText(this,"A2dpPlayback failed to create an instance",
-                            Toast.LENGTH_SHORT).show();
-           return false;
-        }
-        try {
-            mA2dp.setAudioSource(MediaRecorder.AudioSource.FM_RX_A2DP);
-            mA2dp.setOutputFormat(MediaRecorder.OutputFormat.RAW_AMR);
-            mA2dp.setAudioEncoder(MediaRecorder.OutputFormat.DEFAULT);
-            File sampleDir = new File(getFilesDir().getAbsolutePath());
-            try {
-                mA2DPSampleFile = File
-                    .createTempFile("FMRecording", ".3gpp", sampleDir);
-            } catch (IOException e) {
-                Log.e(LOGTAG, "Not able to access Phone's internal memory");
-                Toast.makeText(this, "Not able to access Phone's internal memory",
+      Log.d(LOGTAG, "In startRecording of Recorder");
+      if((true == mSingleRecordingInstanceSupported) &&
+         (true == mOverA2DP )) {
+                Toast.makeText( this,
+                                "playback on BT in progress,can't record now",
                                 Toast.LENGTH_SHORT).show();
                 return false;
-            }
-            mA2dp.setOutputFile(mA2DPSampleFile.getAbsolutePath());
-            mA2dp.prepare();
-            mA2dp.start();
-        } catch (Exception exception) {
-            mA2dp.reset();
-            mA2dp.release();
-            mA2dp = null;
+       }
+       stopRecording();
+
+       if (!Environment.MEDIA_MOUNTED.equals(Environment.getExternalStorageState())) {
+            Log.e(LOGTAG, "startRecording, no external storage available");
+            return false;
+       }
+
+        if (!updateAndShowStorageHint())
+            return false;
+        long maxFileSize = mStorageSpace - LOW_STORAGE_THRESHOLD;
+        if(FmSharedPreferences.getRecordDuration() !=
+            FmSharedPreferences.RECORD_DUR_INDEX_3_VAL) {
+            mRecordDuration = (FmSharedPreferences.getRecordDuration() * 60 * 1000);
+         }
+
+        mRecorder = new MediaRecorder();
+        try {
+              mRecorder.setMaxFileSize(maxFileSize);
+              if (mRecordDuration >= 0)
+                  mRecorder.setMaxDuration(mRecordDuration);
+        } catch (RuntimeException exception) {
+
+        }
+
+        mSampleFile = null;
+        File sampleDir = new File(Environment.getExternalStorageDirectory().getAbsolutePath() +"/FMRecording");
+        if(!(sampleDir.mkdirs() || sampleDir.isDirectory()))
+            return false;
+        try {
+            mSampleFile = File
+                    .createTempFile("FMRecording", ".3gpp", sampleDir);
+        } catch (IOException e) {
+            Log.e(LOGTAG, "Not able to access SD Card");
+            Toast.makeText(this, "Not able to access SD Card", Toast.LENGTH_SHORT).show();
             return false;
         }
+
+        try {
+             Log.d(LOGTAG, "AudioSource.RADIO_TUNER" +MediaRecorder.AudioSource.RADIO_TUNER);
+             mRecorder.setAudioSource(MediaRecorder.AudioSource.RADIO_TUNER);
+             mRecorder.setOutputFormat(MediaRecorder.OutputFormat.THREE_GPP);
+             mRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+             final int samplingRate = 44100;
+             mRecorder.setAudioSamplingRate(samplingRate);
+             final int bitRate = 128000;
+             mRecorder.setAudioEncodingBitRate(bitRate);
+             final int audiochannels = 2;
+             mRecorder.setAudioChannels(audiochannels);
+        } catch (RuntimeException exception) {
+             mRecorder.reset();
+             mRecorder.release();
+             mRecorder = null;
+             return false;
+        }
+        mRecorder.setOutputFile(mSampleFile.getAbsolutePath());
+        try {
+             mRecorder.prepare();
+             Log.d(LOGTAG, "start");
+             mRecorder.start();
+        } catch (IOException e) {
+             mRecorder.reset();
+             mRecorder.release();
+             mRecorder = null;
+             return false;
+        } catch (RuntimeException e) {
+             mRecorder.reset();
+             mRecorder.release();
+             mRecorder = null;
+             return false;
+        }
+        mFmRecordingOn = true;
+        Log.d(LOGTAG, "mSampleFile.getAbsolutePath() " +mSampleFile.getAbsolutePath());
+        mRecorder.setOnInfoListener(new MediaRecorder.OnInfoListener() {
+             public void onInfo(MediaRecorder mr, int what, int extra) {
+                 if ((what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) ||
+                     (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED)) {
+                     if (mFmRecordingOn) {
+                         Log.d(LOGTAG, "Maximum file size/duration reached, stop the recording");
+                         stopRecording();
+                     }
+                     if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED)
+                         // Show the toast.
+                         Toast.makeText(FMRadioService.this, R.string.FMRecording_reach_size_limit,
+                                        Toast.LENGTH_LONG).show();
+                 }
+             }
+             // from MediaRecorder.OnErrorListener
+             public void onError(MediaRecorder mr, int what, int extra) {
+                 Log.e(LOGTAG, "MediaRecorder error. what=" + what + ". extra=" + extra);
+                 if (what == MediaRecorder.MEDIA_RECORDER_ERROR_UNKNOWN) {
+                     // We may have run out of space on the sdcard.
+                     if (mFmRecordingOn) {
+                         stopRecording();
+                     }
+                     updateAndShowStorageHint();
+                 }
+             }
+        });
+
+        mSampleStart = SystemClock.elapsedRealtime();
+        Log.d(LOGTAG, "mSampleStart: " +mSampleStart);
         return true;
- }
-
-   public void stopA2dpPlayback() {
-       if (mA2dp == null)
-           return;
-       if(mA2DPSampleFile != null)
-       {
-          try {
-              mA2DPSampleFile.delete();
-          } catch (Exception e) {
-              Log.e(LOGTAG, "Not able to delete file");
-          }
-       }
-       try {
-           mA2dp.stop();
-           mA2dp.reset();
-           mA2dp.release();
-           mA2dp = null;
-       } catch (Exception exception ) {
-           Log.e( LOGTAG, "Stop failed with exception"+ exception);
-       }
-       return;
-   }
-
-   private void resetA2dpPlayback() {
-       if (mA2dp == null)
-           return;
-       if(mA2DPSampleFile != null)
-       {
-          try {
-              mA2DPSampleFile.delete();
-          } catch (Exception e) {
-              Log.e(LOGTAG, "Not able to delete file");
-          }
-       }
-       try {
-           // Send Intent for IOBUSY VOTE, because MediaRecorder.stop
-           // gets Activity context which might not be always available
-           // and would thus fail to send the intent.
-           Intent ioBusyUnVoteIntent = new Intent(IOBUSY_UNVOTE);
-           // Remove vote for io_is_busy to be turned off.
-           ioBusyUnVoteIntent.putExtra("com.android.server.CpuGovernorService.voteType", 0);
-           sendBroadcast(ioBusyUnVoteIntent);
-
-           mA2dp.stop();
-
-           mA2dp.reset();
-           mA2dp.release();
-           mA2dp = null;
-       } catch (Exception exception ) {
-           Log.e( LOGTAG, "Stop failed with exception"+ exception);
-       }
-       return;
-   }
+  }
 
    public void stopRecording() {
-       if (!mFmRecordingOn)
+       Log.d(LOGTAG, "Enter stopRecord");
+       mFmRecordingOn = false;
+       if (mRecorder == null)
            return;
-       sendRecordIntent(RECORD_STOP);
+       try {
+             mRecorder.stop();
+             mRecorder.reset();
+             mRecorder.release();
+             mRecorder = null;
+       } catch(Exception e) {
+             e.printStackTrace();
+       }
+       int sampleLength = (int)((System.currentTimeMillis() - mSampleStart)/1000 );
+       if (sampleLength == 0)
+           return;
+       String state = Environment.getExternalStorageState();
+       Log.d(LOGTAG, "storage state is " + state);
+
+       if (Environment.MEDIA_MOUNTED.equals(state)) {
+          try {
+               this.addToMediaDB(mSampleFile);
+               Toast.makeText(this,getString(R.string.save_record_file,
+                              mSampleFile.getAbsolutePath( )),
+                              Toast.LENGTH_LONG).show();
+          } catch(Exception e) {
+               e.printStackTrace();
+          }
+       } else {
+           Log.e(LOGTAG, "SD card must have removed during recording. ");
+           Toast.makeText(this, "Recording aborted", Toast.LENGTH_SHORT).show();
+       }
+       try {
+           if((mServiceInUse) && (mCallbacks != null) ) {
+               mCallbacks.onRecordingStopped();
+           }
+       } catch (RemoteException e) {
+           e.printStackTrace();
+       }
        return;
+   }
+
+   /*
+    * Adds file and returns content uri.
+    */
+   private Uri addToMediaDB(File file) {
+       Log.d(LOGTAG, "In addToMediaDB");
+       Resources res = getResources();
+       ContentValues cv = new ContentValues();
+       long current = System.currentTimeMillis();
+       long modDate = file.lastModified();
+       Date date = new Date(current);
+       SimpleDateFormat formatter = new SimpleDateFormat(
+               res.getString(R.string.audio_db_title_format));
+       String title = formatter.format(date);
+
+       // Lets label the recorded audio file as NON-MUSIC so that the file
+       // won't be displayed automatically, except for in the playlist.
+       cv.put(MediaStore.Audio.Media.IS_MUSIC, "1");
+
+       cv.put(MediaStore.Audio.Media.TITLE, title);
+       cv.put(MediaStore.Audio.Media.DATA, file.getAbsolutePath());
+       cv.put(MediaStore.Audio.Media.DATE_ADDED, (int) (current / 1000));
+       cv.put(MediaStore.Audio.Media.DATE_MODIFIED, (int) (modDate / 1000));
+       cv.put(MediaStore.Audio.Media.MIME_TYPE, "AUDIO_AAC_MP4");
+       cv.put(MediaStore.Audio.Media.ARTIST,
+               res.getString(R.string.audio_db_artist_name));
+       cv.put(MediaStore.Audio.Media.ALBUM,
+               res.getString(R.string.audio_db_album_name));
+       Log.d(LOGTAG, "Inserting audio record: " + cv.toString());
+       ContentResolver resolver = getContentResolver();
+       Uri base = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+       Log.d(LOGTAG, "ContentURI: " + base);
+       Uri result = resolver.insert(base, cv);
+       if (result == null) {
+           Toast.makeText(this, "Unable to save recorded audio", Toast.LENGTH_SHORT).show();
+           return null;
+       }
+       if (getPlaylistId(res) == -1) {
+           createPlaylist(res, resolver);
+       }
+       int audioId = Integer.valueOf(result.getLastPathSegment());
+       addToPlaylist(resolver, audioId, getPlaylistId(res));
+
+       // Notify those applications such as Music listening to the
+       // scanner events that a recorded audio file just created.
+       sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, result));
+       return result;
+   }
+
+   private int getPlaylistId(Resources res) {
+       Uri uri = MediaStore.Audio.Playlists.getContentUri("external");
+       final String[] ids = new String[] { MediaStore.Audio.Playlists._ID };
+       final String where = MediaStore.Audio.Playlists.NAME + "=?";
+       final String[] args = new String[] { res.getString(R.string.audio_db_playlist_name) };
+       Cursor cursor = query(uri, ids, where, args, null);
+       if (cursor == null) {
+           Log.v(LOGTAG, "query returns null");
+       }
+       int id = -1;
+       if (cursor != null) {
+           cursor.moveToFirst();
+           if (!cursor.isAfterLast()) {
+               id = cursor.getInt(0);
+           }
+           cursor.close();
+       }
+       return id;
+   }
+
+   private Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+       try {
+           ContentResolver resolver = getContentResolver();
+           if (resolver == null) {
+               return null;
+           }
+           return resolver.query(uri, projection, selection, selectionArgs, sortOrder);
+        } catch (UnsupportedOperationException ex) {
+           return null;
+       }
+   }
+
+   private Uri createPlaylist(Resources res, ContentResolver resolver) {
+       ContentValues cv = new ContentValues();
+       cv.put(MediaStore.Audio.Playlists.NAME, res.getString(R.string.audio_db_playlist_name));
+       Uri uri = resolver.insert(MediaStore.Audio.Playlists.getContentUri("external"), cv);
+       if (uri == null) {
+           Toast.makeText(this, "Unable to save recorded audio", Toast.LENGTH_SHORT).show();
+       }
+       return uri;
+   }
+
+   private void addToPlaylist(ContentResolver resolver, int audioId, long playlistId) {
+       String[] cols = new String[] {
+               "count(*)"
+       };
+       Uri uri = MediaStore.Audio.Playlists.Members.getContentUri("external", playlistId);
+       Cursor cur = resolver.query(uri, cols, null, null, null);
+       final int base;
+       if (cur != null) {
+            cur.moveToFirst();
+            base = cur.getInt(0);
+            cur.close();
+       }
+       else {
+            base = 0;
+       }
+       ContentValues values = new ContentValues();
+       values.put(MediaStore.Audio.Playlists.Members.PLAY_ORDER, Integer.valueOf(base + audioId));
+       values.put(MediaStore.Audio.Playlists.Members.AUDIO_ID, audioId);
+       resolver.insert(uri, values);
    }
 
    private void fmActionOnCallState( int state ) {
@@ -1128,14 +1365,7 @@ public class FMRadioService extends Service
 
        if((TelephonyManager.CALL_STATE_OFFHOOK == state)||
           (TelephonyManager.CALL_STATE_RINGING == state)) {
-           boolean bTempSpeaker = (mSpeakerPhoneOn | mSpeakerOnFocusLoss) ; //need to restore SpeakerPhone
-           if (mUnMuteOnFocusLoss) {
-               if (audioManager != null) {
-                   Log.d(LOGTAG, "Mute");
-                   mMuted = true;
-                   audioManager.setStreamMute(AudioManager.STREAM_MUSIC,true);
-               }
-           }
+           boolean bTempSpeaker = mSpeakerPhoneOn ; //need to restore SpeakerPhone
            boolean bTempMute = mMuted;// need to restore Mute status
            int bTempCall = mCallStatus;//need to restore call status
            if (isFmOn() && fmOff()) {
@@ -1179,6 +1409,14 @@ public class FMRadioService extends Service
                    } else if (mFreq > 0) {
                       tune(mFreq);
                    }
+              }
+          } else {
+              if (!isFmOn() && (mServiceInUse) && (mCallbacks != null)) {
+                  try {
+                      mCallbacks.onDisabled();
+                  } catch (RemoteException e) {
+                      e.printStackTrace();
+                  }
               }
           }
        }//idle
@@ -1262,23 +1500,10 @@ public class FMRadioService extends Service
                       Log.v(LOGTAG, "AudioFocus: received AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK");
                   case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
                       Log.v(LOGTAG, "AudioFocus: received AUDIOFOCUS_LOSS_TRANSIENT");
-                      if (mSpeakerPhoneOn) {
-                         mSpeakerDisableHandler.removeCallbacks(mSpeakerDisableTask);
-                         mSpeakerDisableHandler.postDelayed(mSpeakerDisableTask, 0);
-                         mSpeakerOnFocusLoss = true;
-                      }
                       if (true == mPlaybackInProgress) {
-                          if(mMuted) {
-                             unMute();
-                             mUnMuteOnFocusLoss = true;
-                          }
                           stopFM();
+                          mStoppedOnFocusLoss = true;
                       }
-                      if (mSpeakerPhoneOn) {
-                          if (isAnalogModeSupported())
-                              setAudioPath(false);
-                      }
-                      mStoppedOnFocusLoss = true;
                       break;
                   case AudioManager.AUDIOFOCUS_LOSS:
                       Log.v(LOGTAG, "AudioFocus: received AUDIOFOCUS_LOSS");
@@ -1471,6 +1696,11 @@ public class FMRadioService extends Service
          return(mService.get().isFmRecordingOn());
       }
 
+      public boolean isRtPlusSupported()
+      {
+         return(mService.get().isRtPlusSupported());
+      }
+
       public boolean isSpeakerEnabled()
       {
          return(mService.get().isSpeakerEnabled());
@@ -1511,9 +1741,9 @@ public class FMRadioService extends Service
          return(mService.get().isMuted());
       }
 
-      public void startRecording()
+      public boolean startRecording()
       {
-         mService.get().startRecording();
+         return(mService.get().startRecording());
       }
 
       public void stopRecording()
@@ -1742,6 +1972,11 @@ public class FMRadioService extends Service
       {
          return(mService.get().isSSRInProgress());
       }
+
+      public boolean isA2DPConnected()
+      {
+         return(mService.get().isA2DPConnected());
+      }
    }
    private final IBinder mBinder = new ServiceStub(this);
 
@@ -1903,7 +2138,6 @@ public class FMRadioService extends Service
          Log.d(LOGTAG, "audioManager.setFmRadioOn false done \n" );
       }
 
-      sendRecordServiceIntent(RECORD_STOP);
       if (isAnalogModeEnabled()) {
               SystemProperties.set("hw.fm.isAnalog","false");
               misAnalogPathEnabled = false;
@@ -1969,7 +2203,6 @@ public class FMRadioService extends Service
       // This will reset the FM radio receiver
       if (mReceiver != null)
       {
-         bStatus = mReceiver.reset();
          mReceiver = null;
       }
       stop();
@@ -1980,6 +2213,9 @@ public class FMRadioService extends Service
       return mIsSSRInProgress;
    }
 
+   public boolean isA2DPConnected() {
+       return (mA2dpConnected);
+   }
    /* Returns whether FM hardware is ON.
     *
     * @return true if FM was tuned, searching. (at the end of
@@ -2003,6 +2239,10 @@ public class FMRadioService extends Service
       return mFmRecordingOn;
    }
 
+   public boolean isRtPlusSupported() {
+      return mRtPlusSupport;
+   }
+
    public boolean isSpeakerEnabled() {
       return mSpeakerPhoneOn;
    }
@@ -2020,53 +2260,17 @@ public class FMRadioService extends Service
        if(isCallActive())
            return ;
        mSpeakerPhoneOn = speakerOn;
-       boolean analogmode = isAnalogModeSupported();
-       if (false == speakerOn) {
-           if (analogmode) {
-                if (isFmRecordingOn())
-                    stopRecording();
-                stopFM();
-               AudioSystem.setForceUse(AudioSystem.FOR_MEDIA, AudioSystem.FORCE_NONE);
-               if (mMuted) {
-                   setAudioPath(true);
-               } else {
-                   mute();
-                   setAudioPath(true);
-                   unMute();
-               }
-           } else {
-               AudioSystem.setForceUse(AudioSystem.FOR_MEDIA, AudioSystem.FORCE_NONE);
-           }
-           if (analogmode)
-                startFM();
+       Log.d(LOGTAG, "speakerOn:" + speakerOn);
+       if ((false == speakerOn) && (!mA2dpConnected)) {
+            Log.d(LOGTAG, "enabling headset");
+            AudioSystem.setForceUse(AudioSystem.FOR_MEDIA, AudioSystem.FORCE_NONE);
        }
 
-
-       //Need to turn off BT path when Speaker is set on vice versa.
-       if( !mA2dpDeviceSupportInHal && !analogmode && true == mA2dpDeviceState.isDeviceAvailable()) {
-           if( ((true == mOverA2DP) && (true == speakerOn)) ||
-               ((false == mOverA2DP) && (false == speakerOn)) ) {
-              //disable A2DP playback for speaker option
-               stopFM();
-               startFM();
-           }
-       }
        if (speakerOn) {
-           if (analogmode) {
-                 stopFM();
-                 if (mMuted) {
-                     setAudioPath(false);
-                 } else {
-                     mute();
-                     setAudioPath(false);
-                     unMute();
-                 }
-           }
+           Log.d(LOGTAG, "enabling speaker");
            AudioSystem.setForceUse(AudioSystem.FOR_MEDIA, AudioSystem.FORCE_SPEAKER);
-           if (analogmode)
-                startFM();
        }
-
+       Log.d(LOGTAG, "speakerOn completed:" + speakerOn);
    }
   /*
    *  ReConfigure the FM Setup parameters
@@ -2672,6 +2876,7 @@ public class FMRadioService extends Service
 
    public void clearStationInfo() {
        if(mFMRxRDSData != null) {
+          mRtPlusSupport = false;
           mFMRxRDSData.setRadioText("");
           mFMRxRDSData.setPrgmId(0);
           mFMRxRDSData.setPrgmType(0);
@@ -2721,6 +2926,11 @@ public class FMRadioService extends Service
                     if (isAntennaAvailable())
                     {
                         mIsSSRInProgress = true;
+                        try {
+                             Thread.sleep(2000);
+                        } catch (Exception ex) {
+                            Log.d( LOGTAG, "RunningThread InterruptedException in RadioReset");
+                        }
                         bStatus = fmOn();
                         if(bStatus)
                         {
@@ -2966,6 +3176,7 @@ public class FMRadioService extends Service
       {
          int tag_nums;
          Log.d(LOGTAG, "FmRxEvRTPlusInfo");
+         mRtPlusSupport =  true;
          if (mReceiver != null) {
              mFMRxRDSData = mReceiver.getRTPlusInfo();
              tag_nums = mFMRxRDSData.getTagNums();
